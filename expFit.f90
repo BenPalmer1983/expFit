@@ -85,6 +85,7 @@ PROGRAM expFit
     Real(kind=DoubleReal), Dimension(1:3) :: outputA
     Real(kind=DoubleReal), Dimension(1:5) :: outputB
     Real(kind=DoubleReal), Dimension(1:7) :: outputC
+    Real(kind=DoubleReal), Dimension(1:9) :: outputD
     Real(kind=DoubleReal) :: programStartTime, programEndTime
 ! MPI vars    
     Integer(kind=StandardInteger) :: processID, processCount, error
@@ -139,7 +140,7 @@ PROGRAM expFit
       End If
     End If  
 ! Fit - three exponential terms 
-    If(fitType.eq.3)Then  ! Not working yet
+    If(fitType.eq.3)Then
       outputC = TripleDecayFit(dataPoints)
 ! End Time    
       Call cpu_time(programEndTime)
@@ -156,6 +157,26 @@ PROGRAM expFit
         print "(A21,E14.7)","lC:                  ",outputC(6)     
       End If
     End If      
+! Fit - three exponential terms 
+    If(fitType.eq.4)Then
+      outputD = QuadDecayFit(dataPoints)
+! End Time    
+      Call cpu_time(programEndTime)
+! Output    
+      If(processID.eq.0)Then
+        print "(A21,F14.7)","Time:                ",(programEndTime-programStartTime)
+        print "(A21,E14.7)","Final RSS Value:     ",outputD(9)
+        print "(A47)","f(x) = a exp(lA x) + b exp(lB x) + c exp(lC x) + d exp(lD x) "
+        print "(A21,E14.7)","a:                   ",outputD(1)
+        print "(A21,E14.7)","lA:                  ",outputD(2)
+        print "(A21,E14.7)","b:                   ",outputD(3)
+        print "(A21,E14.7)","lB:                  ",outputD(4)   
+        print "(A21,E14.7)","c:                   ",outputD(5)
+        print "(A21,E14.7)","lC:                  ",outputD(6)   
+        print "(A21,E14.7)","d:                   ",outputD(7)
+        print "(A21,E14.7)","lD:                  ",outputD(8)    
+      End If
+    End If  
     
   End Subroutine M_expFit   
   
@@ -163,7 +184,34 @@ PROGRAM expFit
 ! Functions
 ! ------------------------------------------------------------------------!
 
- 
+  
+  Function LinearRegression(Y, X) RESULT (coefficients)  
+!  Linear regression 
+!  B = (XTX)-1 XTY
+!  f(x) = a_1 x_1 + a_2 x_2 +...+ a_n x_n   
+    Implicit None  !Force declaration of all variables
+! In
+    Real(kind=DoubleReal), Dimension(:) :: Y       ! rows        Y input points
+    Real(kind=DoubleReal), Dimension(:,:) :: X     ! rows,cols   X input points
+! Out    
+    Real(kind=DoubleReal), Dimension(1:size(X,2)) :: coefficients
+! Private 
+    Real(kind=DoubleReal), Dimension(1:size(X,2),1:size(X,1)) :: XT
+    Real(kind=DoubleReal), Dimension(1:size(X,2),1:size(X,2)) :: XTX
+    Real(kind=DoubleReal), Dimension(1:size(X,2)) :: XTY
+! Init vars    
+    coefficients = 0.0D0
+! Check the input is OK    
+    If(size(Y,1).eq.size(X,1))Then
+      XT = TransposeMatrix(X)
+      XTX = matmul(XT,X)
+      XTY = matmul(XT,Y)
+      XTX = InvertMatrix(XTX)  ! reuse XTX variable
+      coefficients = matmul(XTX,XTY)
+    End If  
+  End Function LinearRegression
+  
+  
   Function SingleDecayFit(dataPoints, convergenceThresholdIn) RESULT (output)
 ! Fits double exponential to data
 ! f(x) = a exp(lA)
@@ -535,18 +583,15 @@ PROGRAM expFit
     Integer(kind=StandardInteger) :: i, n, k
     Real(kind=DoubleReal), Dimension(:,:) :: dataPoints
     Real(kind=DoubleReal), Dimension(1:7) :: output
-! Lin Reg approx vars    
-    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1)) :: S
-    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1)) :: SS
-    Real(kind=DoubleReal), Dimension(1:4) :: cMatrix, yMatrix
-    Real(kind=DoubleReal), Dimension(1:4,1:4) :: xMatrix
-    Real(kind=DoubleReal) :: sumX, sumY, sumX_X, sumX_Y, sumS_X, sumS_Y, sumSS_X, sumSS_Y
-    Real(kind=DoubleReal) :: sumS, sumSS, sumS_S, sumS_SS, sumSS_SS
-    Real(kind=DoubleReal) :: p1, q1
-    Real(kind=DoubleReal), Dimension(1:2) :: cbMatrix, ybMatrix
-    Real(kind=DoubleReal), Dimension(1:2,1:2) :: xbMatrix
-    Real(kind=DoubleReal) :: sumB_B, sumB_N, sumN_N, sumB_Y, sumN_Y
-    Real(kind=DoubleReal) :: beta, eta  
+! Approx regression    
+    Integer(kind=StandardInteger) :: iA, iB, iC, gridSize, searchBetterFailCount
+    Real(kind=DoubleReal) :: maxLambda, minLambda
+    Real(kind=DoubleReal) :: lambdaInc 
+    Real(kind=DoubleReal) :: lA, lB, lC
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1)) :: yReg
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1),1:3) :: xReg
+    Real(kind=DoubleReal), Dimension(1:3) :: linCoeffs
+    Real(kind=DoubleReal) :: linRSS, linBestRSS, bestRSSLastSearch
 ! LMA Vars
     Real(kind=DoubleReal) :: rss, testRSS, bestRSS, convergence, lambda  
     Real(kind=DoubleReal), Dimension(1:6) :: parameters, parameters_Last
@@ -561,120 +606,77 @@ PROGRAM expFit
     convergenceThreshold = 1.0D-8
     If(Present(convergenceThresholdIn))Then
       convergenceThreshold = convergenceThresholdIn
-    End If
-!   
-!-----------------------------------------
-! Approximate linear regression 
-!-----------------------------------------
-! Advice from Claude Leibovici
-! Book by Jean Jacquelin:  https://www.scribd.com/doc/14674814/Regressions-et-equations-integrales
-! 
+    End If    
 ! Init vars
-   sumX = 0.0D0
-   sumY = 0.0D0
-   sumX_X = 0.0D0
-   sumX_Y = 0.0D0
-   sumS_X = 0.0D0
-   sumS_Y = 0.0D0
-   sumSS_X = 0.0D0
-   sumSS_Y = 0.0D0
-   sumS = 0.0D0
-   sumSS = 0.0D0
-   sumS_S = 0.0D0
-   sumS_SS = 0.0D0
-   sumSS_SS = 0.0D0
-! Numeric integration to calc S and SS array
-    n = size(dataPoints,1)      ! number of data points
-    Do i=1,n
-      If(i.eq.1)Then
-        S(i) = 0.0D0
-        SS(i) = 0.0D0
-      Else  
-        S(i) = S(i-1) + 0.5D0*(dataPoints(i,2)+dataPoints(i-1,2))*&
-        (dataPoints(i,1)-dataPoints(i-1,1)) ! Numeric integration
-        SS(i) = SS(i-1) + 0.5D0*(S(i)+S(i-1))*&
-        (dataPoints(i,1)-dataPoints(i-1,1)) ! Numeric integration
-      End If 
-    End Do
-! Sum    
-    Do i=1,n
-      sumX = sumX + dataPoints(i,1)
-      sumY = sumY + dataPoints(i,2)
-      sumX_X = sumX_X + (dataPoints(i,1)*dataPoints(i,1))
-      sumX_Y = sumX_Y + (dataPoints(i,1)*dataPoints(i,2))
-      sumS_X = sumS_X + S(i)*dataPoints(i,1)
-      sumS_Y = sumS_Y + S(i)*dataPoints(i,2)
-      sumSS_X = sumSS_X + SS(i)*dataPoints(i,1)
-      sumSS_Y = sumSS_Y + SS(i)*dataPoints(i,2)
-      sumS = sumS + S(i)
-      sumSS = sumSS + SS(i)
-      sumS_S = sumS_S + S(i)*S(i)
-      sumS_SS = sumS_SS + S(i)*SS(i)
-      sumSS_SS = sumSS_SS + SS(i)*SS(i)
-    End Do
-! Make y matrix    
-    yMatrix(1) = sumSS_Y
-    yMatrix(2) = sumS_Y
-    yMatrix(3) = sumX_Y
-    yMatrix(4) = sumY
-! Make xMatrix
-    xMatrix(1,1) = sumSS_SS
-    xMatrix(1,2) = sumS_SS
-    xMatrix(1,3) = sumSS_X
-    xMatrix(1,4) = sumSS
-    xMatrix(2,1) = sumS_SS
-    xMatrix(2,2) = sumS_S
-    xMatrix(2,3) = sumS_X
-    xMatrix(2,4) = sumS
-    xMatrix(3,1) = sumSS_X
-    xMatrix(3,2) = sumS_X
-    xMatrix(3,3) = sumX_X
-    xMatrix(3,4) = sumX
-    xMatrix(4,1) = sumSS
-    xMatrix(4,2) = sumS
-    xMatrix(4,3) = sumX
-    xMatrix(4,4) = n 
-! Solve set of equations
-    xMatrix = InvertMatrix(xMatrix)
-    cMatrix = matmul(xMatrix,yMatrix)
-! calculate P and Q for next regression    
-    p1 = 0.5D0*(cMatrix(2)+sqrt(cMatrix(2)*cMatrix(2)+4*cMatrix(1)))
-    q1 = 0.5D0*(cMatrix(2)-sqrt(cMatrix(2)*cMatrix(2)+4*cMatrix(1)))
-! Sum
-    sumB_B = 0.0D0 
-    sumB_N = 0.0D0
-    sumN_N = 0.0D0
-    sumB_Y = 0.0D0
-    sumN_Y = 0.0D0
-    Do i=1,n
-      beta = exp(p1*dataPoints(i,1))
-      eta = exp(q1*dataPoints(i,1))
-      sumB_B = sumB_B + beta*beta
-      sumB_N = sumB_N + beta*eta
-      sumN_N = sumN_N + eta*eta
-      sumB_Y = sumB_Y + beta*dataPoints(i,2)
-      sumN_Y = sumN_Y + eta*dataPoints(i,2)
-    End Do
-! Make next x matrix
-    xbMatrix(1,1) = sumB_B
-    xbMatrix(1,2) = sumB_N
-    xbMatrix(2,1) = sumB_N
-    xbMatrix(2,2) = sumN_N
-! Make next y matrix    
-    ybMatrix(1) = sumB_Y
-    ybMatrix(2) = sumN_Y
-! Calc cb
-    xbMatrix = InvertMatrix(xbMatrix)
-    cbMatrix = matmul(xbMatrix,ybMatrix) 
+    parameters = 0.0D0    
+    parameters_Last = 0.0D0    
+    linBestRSS = 0.0D0 
+    bestRSSLastSearch = 0.0D0 
+! Set grid size
+    gridSize = 15
+! Make y array
+    Do i=1,size(dataPoints,1)
+      yReg(i) = dataPoints(i,2)
+    End Do  
+! Loop through combinations
+    maxLambda = 0.5D0
+    searchBetterFailCount = 0
+    Do n=1,20   ! expand search "area"    
+      maxLambda = 2.0D0*maxLambda   ! grid from -maxLambda to maxLambda
+      minLambda = -1.0D0 * maxLambda
+      lambdaInc = (2*maxLambda)/(gridSize-1)
+      Do iA=1,gridSize-2
+        lA = minLambda + (iA-1)*lambdaInc
+        Do i=1,size(dataPoints,1)
+          xReg(i,1) = exp(lA*dataPoints(i,1))  ! Make x1 array (for the A exp(lA x) function)
+        End Do
+        Do iB=iA+1,gridSize-1  
+          lB = minLambda + (iB-1)*lambdaInc
+          Do i=1,size(dataPoints,1)
+            xReg(i,2) = exp(lB*dataPoints(i,1))  ! Make x1 array (for the A exp(lA x) function)
+          End Do
+          Do iC=iB+1,gridSize 
+            lC = minLambda + (iC-1)*lambdaInc
+            Do i=1,size(dataPoints,1)
+              xReg(i,3) = exp(lC*dataPoints(i,1))
+            End Do      
+            linCoeffs = LinearRegression(yReg, xReg)     
+            linRSS = TripleDecayFitRSS(dataPoints, linCoeffs(1), lA, linCoeffs(2), lB, linCoeffs(3), lC)
+            If(iA.eq.1.and.iB.eq.2.and.iC.eq.3)Then
+              linBestRSS = linRSS
+              parameters(1) = linCoeffs(1)
+              parameters(2) = lA
+              parameters(3) = linCoeffs(2)
+              parameters(4) = lB
+              parameters(5) = linCoeffs(3)
+              parameters(6) = lC
+            Else  
+              If(linRSS.lt.linBestRSS)Then
+                linBestRSS = linRSS
+                parameters(1) = linCoeffs(1)
+                parameters(2) = lA
+                parameters(3) = linCoeffs(2)
+                parameters(4) = lB
+                parameters(5) = linCoeffs(3)
+                parameters(6) = lC
+              End If
+            End If   
+          End Do
+        End Do
+      End Do
+      If(linBestRSS.gt.bestRSSLastSearch)Then
+        searchBetterFailCount = searchBetterFailCount + 1
+        If(searchBetterFailCount.eq.2)Then ! If two successive fails, break out
+          Exit
+        End If
+      Else
+        searchBetterFailCount = 0 ! reset fail count
+        bestRSSLastSearch = linBestRSS
+      End If  
+    End Do   
 !--------------------------------------------------
 ! LMA
 !--------------------------------------------------    
-    parameters(1) = cbMatrix(1)
-    parameters(2) = p1
-    parameters(3) = cbMatrix(2)
-    parameters(4) = q1
-    parameters(5) = 1.0D0 
-    parameters(6) = 1.0D0
     Do i=1,4    
       If(isnan(parameters(i)))Then  ! If fitting fails
         parameters(i) = 1.0D0
@@ -730,7 +732,7 @@ PROGRAM expFit
           parameters(5)*exp(parameters(6)*dataPoints(i,1))&
           )-dataPoints(i,2))**2
         End Do
-! Delayed gratification scheme - 1.5*lambda or 0.2*lambda  
+! Delayed gratification scheme - 1.5*lambda or 0.2*lambda   
         If(testRSS.gt.rss)Then  ! If worse
           lambda = lambda * 1.5D0   
           parameters = parameters_Last  
@@ -757,7 +759,214 @@ PROGRAM expFit
     output(5) = parameters(5)  ! c
     output(6) = parameters(6)  ! d
     output(7) = bestRSS
-  End Function TripleDecayFit   
+  End Function TripleDecayFit 
+  
+   
+  Function QuadDecayFit(dataPoints, convergenceThresholdIn) RESULT (output)
+! Fits double exponential to data
+! f(x) = a exp(lA) + b exp(lB)
+    Implicit None  !Force declaration of all variables
+! Declare variables
+    Real(kind=DoubleReal), Optional :: convergenceThresholdIn
+    Real(kind=DoubleReal) :: convergenceThreshold
+    Integer(kind=StandardInteger) :: i, n, k
+    Real(kind=DoubleReal), Dimension(:,:) :: dataPoints
+    Real(kind=DoubleReal), Dimension(1:9) :: output
+! Approx regression    
+    Integer(kind=StandardInteger) :: iA, iB, iC, i_D, gridSize, searchBetterFailCount
+    Real(kind=DoubleReal) :: maxLambda, minLambda
+    Real(kind=DoubleReal) :: lambdaInc 
+    Real(kind=DoubleReal) :: lA, lB, lC, lD
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1)) :: yReg
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1),1:4) :: xReg
+    Real(kind=DoubleReal), Dimension(1:4) :: linCoeffs
+    Real(kind=DoubleReal) :: linRSS, linBestRSS, bestRSSLastSearch
+! LMA Vars
+    Real(kind=DoubleReal) :: rss, testRSS, bestRSS, convergence, lambda  
+    Real(kind=DoubleReal), Dimension(1:8) :: parameters, parameters_Last
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1)) :: R
+    Real(kind=DoubleReal), Dimension(1:size(dataPoints,1),1:8) :: J
+    Real(kind=DoubleReal), Dimension(1:8,1:size(dataPoints,1)) :: JT     ! Transpose Jacobian
+    Real(kind=DoubleReal), Dimension(1:8,1:8) :: JTJ    ! (Jacobian Transpose * Jacobian)
+    Real(kind=DoubleReal), Dimension(1:8,1:8) :: JTJ_Diag
+    Real(kind=DoubleReal), Dimension(1:8) :: JTR                ! (Jacobian Transpose * Residuals)
+    Real(kind=DoubleReal), Dimension(1:8) :: P      ! Change  
+! Optional argument
+    convergenceThreshold = 1.0D-8
+    If(Present(convergenceThresholdIn))Then
+      convergenceThreshold = convergenceThresholdIn
+    End If    
+! Init vars
+    parameters = 0.0D0    
+    parameters_Last = 0.0D0    
+    linBestRSS = 0.0D0 
+    bestRSSLastSearch = 0.0D0 
+! Set grid size
+    gridSize = 15
+! Make y array
+    Do i=1,size(dataPoints,1)
+      yReg(i) = dataPoints(i,2)
+    End Do  
+! Loop through combinations
+    maxLambda = 0.5D0
+    searchBetterFailCount = 0
+    Do n=1,20   ! expand search "area"    
+      maxLambda = 2.0D0*maxLambda   ! grid from -maxLambda to maxLambda
+      minLambda = -1.0D0 * maxLambda
+      lambdaInc = (2*maxLambda)/(gridSize-1)
+      Do iA=1,gridSize-3
+        lA = minLambda + (iA-1)*lambdaInc
+        Do i=1,size(dataPoints,1)
+          xReg(i,1) = exp(lA*dataPoints(i,1))  ! Make x1 array (for the A exp(lA x) function)
+        End Do
+        Do iB=iA+1,gridSize-2  
+          lB = minLambda + (iB-1)*lambdaInc
+          Do i=1,size(dataPoints,1)
+            xReg(i,2) = exp(lB*dataPoints(i,1))  ! Make x1 array (for the A exp(lA x) function)
+          End Do
+          Do iC=iB+1,gridSize-1 
+            lC = minLambda + (iC-1)*lambdaInc
+            Do i=1,size(dataPoints,1)
+              xReg(i,3) = exp(lC*dataPoints(i,1))
+            End Do    
+            Do i_D=iC+1,gridSize 
+              lD = minLambda + (i_D-1)*lambdaInc
+              Do i=1,size(dataPoints,1)
+                xReg(i,4) = exp(lD*dataPoints(i,1))
+              End Do   
+              linCoeffs = LinearRegression(yReg, xReg)     
+              linRSS = QuadDecayFitRSS(&
+              dataPoints, linCoeffs(1), lA, linCoeffs(2), lB,&
+              linCoeffs(3), lC, linCoeffs(4), lD)
+              If(iA.eq.1.and.iB.eq.2.and.iC.eq.3)Then
+                linBestRSS = linRSS
+                parameters(1) = linCoeffs(1)
+                parameters(2) = lA
+                parameters(3) = linCoeffs(2)
+                parameters(4) = lB
+                parameters(5) = linCoeffs(3)
+                parameters(6) = lC
+                parameters(7) = linCoeffs(4)
+                parameters(8) = lD
+              Else  
+                If(linRSS.lt.linBestRSS)Then
+                  linBestRSS = linRSS
+                  parameters(1) = linCoeffs(1)
+                  parameters(2) = lA
+                  parameters(3) = linCoeffs(2)
+                  parameters(4) = lB
+                  parameters(5) = linCoeffs(3)
+                  parameters(6) = lC
+                  parameters(7) = linCoeffs(4)
+                  parameters(8) = lD
+                End If
+              End If   
+            End Do  
+          End Do
+        End Do
+      End Do
+      If(linBestRSS.gt.bestRSSLastSearch)Then
+        searchBetterFailCount = searchBetterFailCount + 1
+        If(searchBetterFailCount.eq.2)Then ! If two successive fails, break out
+          Exit
+        End If
+      Else
+        searchBetterFailCount = 0 ! reset fail count
+        bestRSSLastSearch = linBestRSS
+      End If  
+    End Do   
+!--------------------------------------------------
+! LMA
+!--------------------------------------------------    
+    Do i=1,4    
+      If(isnan(parameters(i)))Then  ! If fitting fails
+        parameters(i) = 1.0D0
+      End If  
+    End Do
+! LMA Opt
+    convergence = 1.0D0
+    lambda = 1.0D0
+!----------------
+! Start LMA loop
+    Do n=1,1000  ! maximum 1000 loops
+      rss = 0.0D0
+! Make Jacobian and Residuals matrix
+      Do i=1,size(dataPoints,1)
+        R(i) = (parameters(1)*exp(parameters(2)*dataPoints(i,1))+&
+        parameters(3)*exp(parameters(4)*dataPoints(i,1))+&
+        parameters(5)*exp(parameters(6)*dataPoints(i,1))+&
+        parameters(7)*exp(parameters(8)*dataPoints(i,1))&
+        )-dataPoints(i,2)   ! f(x)-y
+        J(i,1) = exp(parameters(2)*dataPoints(i,1))  ! d/dx1
+        J(i,2) = dataPoints(i,1)*parameters(1)*exp(parameters(2)*dataPoints(i,1))  ! d/dx2
+        J(i,3) = exp(parameters(4)*dataPoints(i,1))  ! d/dx3
+        J(i,4) = dataPoints(i,1)*parameters(3)*exp(parameters(4)*dataPoints(i,1))  ! d/dx4
+        J(i,5) = exp(parameters(6)*dataPoints(i,1))  ! d/dx5
+        J(i,6) = dataPoints(i,1)*parameters(5)*exp(parameters(6)*dataPoints(i,1))  ! d/dx6
+        J(i,7) = exp(parameters(8)*dataPoints(i,1))  ! d/dx7
+        J(i,8) = dataPoints(i,1)*parameters(7)*exp(parameters(8)*dataPoints(i,1))  ! d/dx8
+        rss = rss + R(i)**2
+      End Do
+      Do k=1,50 ! max 50
+! calculate change matrix
+        !***********     
+        ! P = (JTJ+L*diag(JTJ))^(-1)(-1*JTR)   
+        !***********      
+! Transpose Jacobian
+        JT = TransposeMatrix(J)
+        JTJ = matmul(JT,J)
+        JTJ_Diag = lambda*DiagMatrix(JTJ) ! Dampening Matrix
+        JTJ = MatAdd(JTJ,JTJ_Diag) ! Recycle JTJ
+        JTJ = InvertMatrix(JTJ) ! store inverse (recycle JTJ var)      
+        JTR = matmul(JT,R)
+        JTR = -1.0D0*JTR ! Recycle JTR var
+        P = matmul(JTJ,JTR)  
+! Store last loop values
+        parameters_Last = parameters
+! Update parameters      
+        Do i=1,size(P)
+          parameters(i) = parameters(i) + P(i)
+        End Do       
+! Calc RSS
+        testRSS = 0.0D0
+        Do i=1,size(dataPoints,1)
+          testRSS = testRSS + &
+          ((parameters(1)*exp(parameters(2)*dataPoints(i,1))+&
+          parameters(3)*exp(parameters(4)*dataPoints(i,1))+&
+          parameters(5)*exp(parameters(6)*dataPoints(i,1))+&
+          parameters(7)*exp(parameters(8)*dataPoints(i,1))&
+          )-dataPoints(i,2))**2
+        End Do
+! Delayed gratification scheme - 1.5*lambda or 0.2*lambda   
+        If(testRSS.gt.rss)Then  ! If worse
+          lambda = lambda * 1.5D0   
+          parameters = parameters_Last  
+          bestRSS = rss        
+        Else  ! If better
+          lambda = lambda * 0.2D0
+          bestRSS = testRSS  
+          Exit
+        End If
+      End Do
+      convergence = abs(testRSS-rss) 
+  ! Breakout if convergence threshold met      
+      If(convergence.lt.convergenceThreshold)Then
+        Exit
+      End If
+! End LMA loop
+!----------------
+    End Do  
+! Output   f(x) = a exp(b x) + c exp(d x)
+    output(1) = parameters(1)  ! a
+    output(2) = parameters(2)  ! b
+    output(3) = parameters(3)  ! c
+    output(4) = parameters(4)  ! d
+    output(5) = parameters(5)  ! c
+    output(6) = parameters(6)  ! d
+    output(7) = parameters(7)  ! c
+    output(8) = parameters(8)  ! d
+    output(9) = bestRSS
+  End Function QuadDecayFit   
     
   Function SingleDecayFitRSS(dataPoints, a, lA) RESULT (rss)
     Implicit None  !Force declaration of all variables
@@ -786,6 +995,34 @@ PROGRAM expFit
       rss = rss + (dataPoints(i,2)-y)**2
     End Do
   End Function DoubleDecayFitRSS 
+    
+  Function TripleDecayFitRSS(dataPoints, a, lA, b, lB, c, lC) RESULT (rss)
+    Implicit None  !Force declaration of all variables
+! Declare variables
+    Integer(kind=StandardInteger) :: i
+    Real(kind=DoubleReal), Dimension(:,:) :: dataPoints
+    Real(kind=DoubleReal) :: a, b, c, lA, lB, lC, rss, x, y
+    rss = 0.0D0
+    Do i=1,size(dataPoints,1)
+      x = dataPoints(i,1)
+      y = a*exp(lA*x)+b*exp(lB*x)+c*exp(lC*x)
+      rss = rss + (dataPoints(i,2)-y)**2
+    End Do
+  End Function TripleDecayFitRSS 
+    
+  Function QuadDecayFitRSS(dataPoints, a, lA, b, lB, c, lC, d, lD) RESULT (rss)
+    Implicit None  !Force declaration of all variables
+! Declare variables
+    Integer(kind=StandardInteger) :: i
+    Real(kind=DoubleReal), Dimension(:,:) :: dataPoints
+    Real(kind=DoubleReal) :: a, b, c, d, lA, lB, lC, lD, rss, x, y
+    rss = 0.0D0
+    Do i=1,size(dataPoints,1)
+      x = dataPoints(i,1)
+      y = a*exp(lA*x)+b*exp(lB*x)+c*exp(lC*x)+d*exp(lD*x)
+      rss = rss + (dataPoints(i,2)-y)**2
+    End Do
+  End Function QuadDecayFitRSS 
 
   
 ! ------------------------------------------------------------------------!
