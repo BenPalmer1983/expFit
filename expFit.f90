@@ -97,7 +97,7 @@ PROGRAM expFit
 ! Output    
     If(processID.eq.0)Then
       print "(A30)","------------------------------"
-      print "(A30)"," Double Decay Exponential Fit "
+      print "(A30)","       Exponential Fit        "
       print "(A30)","------------------------------"
       print "(A10,I2)","Fit Type: ",fitType
     End If        
